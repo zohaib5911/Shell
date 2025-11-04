@@ -15,33 +15,8 @@ typedef struct {
 } HistoryEntry;
 
 extern char *history; 
+char* env_path = NULL;
 
-// Builtins registry: user can register implemented commands so autocomplete
-// will prioritize them. Use register_builtin("name") from main().
-#define MAX_BUILTINS 1024
-static char *builtin_commands[MAX_BUILTINS];
-static int builtin_count = 0;
-
-void register_builtin(const char *name) {
-    if (!name) return;
-    if (builtin_count >= MAX_BUILTINS) return;
-    builtin_commands[builtin_count++] = strdup(name);
-}
-
-// Optional: load builtins from a newline-separated file
-void register_builtins_from_file(const char *path) {
-    if (!path) return;
-    FILE *f = fopen(path, "r");
-    if (!f) return;
-    char line[512];
-    while (fgets(line, sizeof(line), f)) {
-        // trim newline
-        char *nl = strchr(line, '\n');
-        if (nl) *nl = '\0';
-        if (*line) register_builtin(line);
-    }
-    fclose(f);
-}
 
 int count_commands() {
     if (!history || *history == '\0')
@@ -194,7 +169,6 @@ void help_commands() {
     printf("  exit          - Exit the shell\n");
 }
 
-
 void rm_r_recursive(const char *path) {
     struct dirent *entry;
     DIR *dir = opendir(path);
@@ -202,7 +176,6 @@ void rm_r_recursive(const char *path) {
         perror("opendir");
         return;
     }
-
     while ((entry = readdir(dir)) != NULL) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
             continue;
@@ -219,13 +192,11 @@ void rm_r_recursive(const char *path) {
             }
         }
     }
-
     closedir(dir);
     if (rmdir(path) != 0) {
         perror("rmdir");
     }
 }
-// gcc,gdb,python --version
 void version_command(const char* arg){
     pid_t pid = fork();
     if (pid == 0) {
@@ -238,29 +209,18 @@ void version_command(const char* arg){
         perror("fork");
     }
 }
-
-
-
-char* env_path = NULL;
-
 void activate_virtualenv(const char *path) {
     char resolved[PATH_MAX];
     if (realpath(path, resolved) == NULL) {
         fprintf(stderr, "source: could not find '%s'\n", path);
         return;
     }
-
-    // Set environment vars
     setenv("VIRTUAL_ENV", resolved, 1);
-
     char new_path[4096];
     snprintf(new_path, sizeof(new_path), "%s/bin:%s", resolved, getenv("PATH"));
     setenv("PATH", new_path, 1);
-
-    // Store venv path safely
     if (env_path) free(env_path);
     env_path = strdup(resolved);
-
     printf("Activated virtual environment: %s\n", resolved);
 }
 
@@ -268,288 +228,11 @@ void deactivate_virtualenv() {
     if (getenv("VIRTUAL_ENV")) {
         unsetenv("VIRTUAL_ENV");
     }
-
-    // Don’t free env_path if the prompt or others might still use it
-    // Instead, just mark it inactive
     if (env_path) {
         free(env_path);
         env_path = NULL;
     }
-
     printf("Deactivated virtual environment\n");
-}
-
-// Fish-like autocomplete: complete the token at cursor_pos in `input`.
-// result will contain the new full line (input with the token replaced by the completion).
-void autocomplete_command(const char *input, int cursor_pos, char *result, size_t result_size) {
-    result[0] = '\0';
-    if (!input || cursor_pos < 0) return;
-
-    int len = (int)strlen(input);
-    if (cursor_pos > len) cursor_pos = len;
-
-    // Find token start: last space before cursor (or 0)
-    int token_start = cursor_pos - 1;
-    while (token_start >= 0 && input[token_start] != ' ' && input[token_start] != '\t')
-        token_start--;
-    token_start++;
-
-    int token_len = cursor_pos - token_start;
-    if (token_len < 0) token_len = 0;
-
-    // extract token
-    char token[1024];
-    if (token_len >= (int)sizeof(token)) token_len = sizeof(token) - 1;
-    memcpy(token, input + token_start, token_len);
-    token[token_len] = '\0';
-
-    // Prefix (before token) and suffix (after cursor)
-    char prefix_line[1024];
-    char suffix_line[1024];
-    int before_len = token_start;
-    if (before_len >= (int)sizeof(prefix_line)) before_len = sizeof(prefix_line) - 1;
-    memcpy(prefix_line, input, before_len);
-    prefix_line[before_len] = '\0';
-
-    int suffix_len = len - cursor_pos;
-    if (suffix_len >= (int)sizeof(suffix_line)) suffix_len = sizeof(suffix_line) - 1;
-    memcpy(suffix_line, input + cursor_pos, suffix_len);
-    suffix_line[suffix_len] = '\0';
-
-    // 1) Special-case: if the command starts with "cd " and we're completing the path token
-    if (strncmp(prefix_line, "cd ", 3) == 0 && token_start >= 3) {
-        const char *dir_prefix = input + 3;
-        DIR *d = opendir(".");
-        if (!d) return;
-        struct dirent *entry;
-        struct stat st;
-        while ((entry = readdir(d)) != NULL) {
-            if (stat(entry->d_name, &st) == 0 && S_ISDIR(st.st_mode)) {
-                if (strncmp(entry->d_name, dir_prefix, strlen(dir_prefix)) == 0) {
-                    snprintf(result, result_size, "%s%s%s", prefix_line, entry->d_name, suffix_line);
-                    closedir(d);
-                    return;
-                }
-            }
-        }
-        closedir(d);
-    }
-
-    // 2) Search history for a line whose token at start matches (only consider lines that start with token when token is at position 0)
-    if (history && *token) {
-        char *copy = strdup(history);
-        if (copy) {
-            char *line = strtok(copy, "\n");
-            while (line) {
-                // find token in the line at the same token_start position
-                if ((int)strlen(line) >= token_start) {
-                    if (strncmp(line + token_start, token, strlen(token)) == 0) {
-                        // build completed line
-                        snprintf(result, result_size, "%s", line);
-                        free(copy);
-                        return;
-                    }
-                }
-                line = strtok(NULL, "\n");
-            }
-            free(copy);
-        }
-    }
-
-    // 3) Search PATH for executables when token is at the beginning of the line (no command before it)
-    if (token_start == 0 && token[0] != '\0') {
-        char *path = getenv("PATH");
-        if (!path) return;
-        char *path_copy = strdup(path);
-        if (!path_copy) return;
-        char *p = strtok(path_copy, ":");
-        struct dirent *entry;
-        while (p) {
-            DIR *d = opendir(p);
-            if (d) {
-                while ((entry = readdir(d)) != NULL) {
-                    if (strncmp(entry->d_name, token, strlen(token)) == 0) {
-                        snprintf(result, result_size, "%s%s%s", prefix_line, entry->d_name, suffix_line);
-                        closedir(d);
-                        free(path_copy);
-                        return;
-                    }
-                }
-                closedir(d);
-            }
-            p = strtok(NULL, ":");
-        }
-        free(path_copy);
-    }
-
-    // nothing found: leave result empty (caller can decide)
-}
-
-// Collect possible completions for the token at cursor_pos.
-// Each match is written into matches[i] (max length 255). Returns number of matches found.
-int collect_completions(const char *input, int cursor_pos, char matches[][256], int max_matches) {
-    if (!input || cursor_pos < 0 || max_matches <= 0) return 0;
-    int len = (int)strlen(input);
-    if (cursor_pos > len) cursor_pos = len;
-
-    int token_start = cursor_pos - 1;
-    while (token_start >= 0 && input[token_start] != ' ' && input[token_start] != '\t')
-        token_start--;
-    token_start++;
-
-    int token_len = cursor_pos - token_start;
-    if (token_len < 0) token_len = 0;
-    if (token_len > 250) token_len = 250;
-
-    char token[256];
-    memcpy(token, input + token_start, token_len);
-    token[token_len] = '\0';
-
-    int count = 0;
-
-    // Helper to add a candidate (avoid overflow) - we directly add items below.
-
-    // 1) If completing after "cd ", suggest directories
-    if (token_start >= 3 && strncmp(input, "cd ", 3) == 0) {
-        DIR *d = opendir(".");
-        if (!d) return 0;
-        struct dirent *entry;
-        struct stat st;
-        while ((entry = readdir(d)) != NULL) {
-            if (stat(entry->d_name, &st) == 0 && S_ISDIR(st.st_mode)) {
-                if (strncmp(entry->d_name, token, strlen(token)) == 0) {
-                    if (count < max_matches) {
-                        snprintf(matches[count], 256, "%s", entry->d_name);
-                        count++;
-                    }
-                }
-            }
-        }
-        closedir(d);
-        return count;
-    }
-
-    // 2) If token_start == 0, search PATH executables and history
-    if (token_start == 0) {
-        // builtins first (registered commands)
-        if (token[0] && builtin_count > 0) {
-            for (int i = 0; i < builtin_count; ++i) {
-                if (strncmp(builtin_commands[i], token, strlen(token)) == 0) {
-                    if (count < max_matches) {
-                        snprintf(matches[count], 256, "%s", builtin_commands[i]);
-                        count++;
-                    }
-                }
-            }
-        }
-
-        // history entries (full line)
-        if (history && *token) {
-            char *copy = strdup(history);
-            if (copy) {
-                char *line = strtok(copy, "\n");
-                while (line) {
-                    if (strncmp(line, token, strlen(token)) == 0) {
-                        if (count < max_matches) {
-                            snprintf(matches[count], 256, "%s", line);
-                            count++;
-                        }
-                    }
-                    line = strtok(NULL, "\n");
-                }
-                free(copy);
-            }
-        }
-
-        char *path = getenv("PATH");
-        if (path) {
-            char *path_copy = strdup(path);
-            if (path_copy) {
-                char *p = strtok(path_copy, ":");
-                struct dirent *entry;
-                while (p) {
-                    DIR *d = opendir(p);
-                    if (d) {
-                        while ((entry = readdir(d)) != NULL) {
-                            if (strncmp(entry->d_name, token, strlen(token)) == 0) {
-                                if (count < max_matches) {
-                                    snprintf(matches[count], 256, "%s", entry->d_name);
-                                    count++;
-                                }
-                            }
-                        }
-                        closedir(d);
-                    }
-                    p = strtok(NULL, ":");
-                }
-                free(path_copy);
-            }
-        }
-        return count;
-    }
-
-    // 3) Otherwise, complete filenames/directories in current working directory or path-like tokens
-    {
-        // If token contains a slash, treat as path
-        if (strchr(token, '/')) {
-            // separate dir and partial
-            char dirpart[PATH_MAX];
-            char basepart[PATH_MAX];
-            char *slash = strrchr(token, '/');
-            if (slash == token) {
-                // starts with /
-                strcpy(dirpart, "/");
-                strcpy(basepart, token + 1);
-            } else {
-                int dp_len = (int)(slash - token);
-                if (dp_len >= (int)sizeof(dirpart)) dp_len = sizeof(dirpart)-1;
-                memcpy(dirpart, token, dp_len);
-                dirpart[dp_len] = '\0';
-                strncpy(basepart, slash + 1, sizeof(basepart)-1);
-                basepart[sizeof(basepart)-1] = '\0';
-            }
-            DIR *d = opendir(dirpart[0] ? dirpart : ".");
-            if (!d) return count;
-            struct dirent *entry;
-            while ((entry = readdir(d)) != NULL) {
-                if (strncmp(entry->d_name, basepart, strlen(basepart)) == 0) {
-                    if (count < max_matches) {
-                        if (dirpart[0])
-                            snprintf(matches[count], 256, "%s/%s", dirpart, entry->d_name);
-                        else
-                            snprintf(matches[count], 256, "%s", entry->d_name);
-                        count++;
-                    }
-                }
-            }
-            closedir(d);
-            return count;
-        }
-
-        DIR *d = opendir(".");
-        if (!d) return count;
-        struct dirent *entry;
-        while ((entry = readdir(d)) != NULL) {
-            if (strncmp(entry->d_name, token, strlen(token)) == 0) {
-                if (count < max_matches) {
-                    snprintf(matches[count], 256, "%s", entry->d_name);
-                    count++;
-                }
-            }
-        }
-        closedir(d);
-    }
-
-    return count;
-}
-
-// Print matches in a dim style (like fish suggestions list)
-void print_completions_dim(char matches[][256], int count) {
-    if (count <= 0) return;
-    // dim code: \033[2m ; reset: \033[0m
-    for (int i = 0; i < count; ++i) {
-        printf("\033[2m%s\033[0m\n", matches[i]);
-    }
 }
 
 
