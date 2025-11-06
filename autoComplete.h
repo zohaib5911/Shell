@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <limits.h>
 #include <ctype.h>
 
 // implemented commands
@@ -217,27 +218,61 @@ const char *get_best_path_match(const char *path_prefix) {
     static char suggestion[PATH_MAX];
     suggestion[0] = '\0';
 
-    char path_copy[PATH_MAX];
-    strcpy(path_copy, path_prefix);
+    if (!path_prefix || path_prefix[0] == '\0')
+        return NULL;
 
-    char *dir = dirname(path_copy);
-    const char *base = strrchr(path_prefix, '/');
-    const char *pattern = base ? base + 1 : path_prefix;
+    char path_copy[PATH_MAX];
+    // safely copy input
+    snprintf(path_copy, sizeof(path_copy), "%s", path_prefix);
+
+    // expand leading ~ to HOME
+    if (path_copy[0] == '~') {
+        const char *home = getenv("HOME");
+        if (!home) home = "/";
+        char expanded[PATH_MAX];
+        if (path_copy[1] == '/' || path_copy[1] == '\0')
+            snprintf(expanded, sizeof(expanded), "%s%s", home, path_copy + 1);
+        else
+            snprintf(expanded, sizeof(expanded), "%s/%s", home, path_copy + 1);
+        snprintf(path_copy, sizeof(path_copy), "%s", expanded);
+    }
+
+    const char *base = strrchr(path_copy, '/');
+    const char *pattern = base ? base + 1 : path_copy;
 
     char dirpath[PATH_MAX];
-    if (base)
-        snprintf(dirpath, sizeof(dirpath), "%.*s", (int)(base - path_prefix), path_prefix);
-    else
-        strcpy(dirpath, ".");
+    if (base) {
+        // if the only slash is at position 0 (i.e. "/foo"), keep dirpath as "/"
+        if (base == path_copy) {
+            snprintf(dirpath, sizeof(dirpath), "/");
+        } else {
+            // copy up to but not including the last '/'
+            size_t len = (size_t)(base - path_copy);
+            if (len >= sizeof(dirpath)) len = sizeof(dirpath) - 1;
+            memcpy(dirpath, path_copy, len);
+            dirpath[len] = '\0';
+        }
+    } else {
+        snprintf(dirpath, sizeof(dirpath), ".");
+    }
 
     DIR *d = opendir(dirpath[0] ? dirpath : ".");
     if (!d) return NULL;
 
     struct dirent *e;
     while ((e = readdir(d)) != NULL) {
+        if (pattern[0] == '\0') {
+            // if pattern is empty (path ended with '/'), accept all non-hidden entries
+            if (e->d_name[0] == '.') continue;
+        }
         if (strncmp(e->d_name, pattern, strlen(pattern)) == 0) {
-            snprintf(suggestion, sizeof(suggestion), "%s%s%s",
-                     dirpath, (dirpath[strlen(dirpath)-1] == '/' ? "" : "/"), e->d_name);
+            if (strcmp(dirpath, "/") == 0) {
+                snprintf(suggestion, sizeof(suggestion), "/%s", e->d_name);
+            } else if (strcmp(dirpath, ".") == 0) {
+                snprintf(suggestion, sizeof(suggestion), "%s", e->d_name);
+            } else {
+                snprintf(suggestion, sizeof(suggestion), "%s/%s", dirpath, e->d_name);
+            }
             closedir(d);
             return suggestion;
         }
@@ -248,17 +283,39 @@ const char *get_best_path_match(const char *path_prefix) {
 }
 
 void print_all_path_matches(const char *path_prefix) {
-    char path_copy[PATH_MAX];
-    strcpy(path_copy, path_prefix);
+    if (!path_prefix) return;
 
-    const char *base = strrchr(path_prefix, '/');
-    const char *pattern = base ? base + 1 : path_prefix;
+    char path_copy[PATH_MAX];
+    snprintf(path_copy, sizeof(path_copy), "%s", path_prefix);
+
+    // expand ~
+    if (path_copy[0] == '~') {
+        const char *home = getenv("HOME");
+        if (!home) home = "/";
+        char expanded[PATH_MAX];
+        if (path_copy[1] == '/' || path_copy[1] == '\0')
+            snprintf(expanded, sizeof(expanded), "%s%s", home, path_copy + 1);
+        else
+            snprintf(expanded, sizeof(expanded), "%s/%s", home, path_copy + 1);
+        snprintf(path_copy, sizeof(path_copy), "%s", expanded);
+    }
+
+    const char *base = strrchr(path_copy, '/');
+    const char *pattern = base ? base + 1 : path_copy;
 
     char dirpath[PATH_MAX];
-    if (base)
-        snprintf(dirpath, sizeof(dirpath), "%.*s", (int)(base - path_prefix), path_prefix);
-    else
-        strcpy(dirpath, ".");
+    if (base) {
+        if (base == path_copy) {
+            snprintf(dirpath, sizeof(dirpath), "/");
+        } else {
+            size_t len = (size_t)(base - path_copy);
+            if (len >= sizeof(dirpath)) len = sizeof(dirpath) - 1;
+            memcpy(dirpath, path_copy, len);
+            dirpath[len] = '\0';
+        }
+    } else {
+        snprintf(dirpath, sizeof(dirpath), ".");
+    }
 
     DIR *d = opendir(dirpath[0] ? dirpath : ".");
     if (!d) return;
@@ -266,6 +323,9 @@ void print_all_path_matches(const char *path_prefix) {
     struct dirent *e;
     printf("\n");
     while ((e = readdir(d)) != NULL) {
+        if (pattern[0] == '\0') {
+            if (e->d_name[0] == '.') continue;
+        }
         if (strncmp(e->d_name, pattern, strlen(pattern)) == 0)
             printf("%s  ", e->d_name);
     }

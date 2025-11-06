@@ -178,10 +178,40 @@ void repaint_line(const char *command) {
     printf("\r\033[K");       
     show_prompt();            
     printf("%s", command);    
-
     const char *match = get_best_match(command);
     if (match && strcmp(match, command) != 0) {
-        printf(COLOR_DIM "%s" COLOR_RESET, match + strlen(command));
+        const char *last_space = strrchr(command, ' ');
+        if (last_space) {
+            const char *last_token = last_space + 1;
+            char expanded[PATH_MAX];
+            if (last_token[0] == '~') {
+                const char *home = getenv("HOME");
+                if (!home) home = "/";
+                if (last_token[1] == '/' || last_token[1] == '\0')
+                    snprintf(expanded, sizeof(expanded), "%s%s", home, last_token + 1);
+                else
+                    snprintf(expanded, sizeof(expanded), "%s/%s", home, last_token + 1);
+            } else {
+                snprintf(expanded, sizeof(expanded), "%s", last_token);
+            }
+
+            size_t elen = strlen(expanded);
+            if (strncmp(match, expanded, elen) == 0) {
+                printf(COLOR_DIM "%s" COLOR_RESET, match + elen);
+            } else {
+                const char *m_basename = strrchr(match, '/');
+                m_basename = m_basename ? m_basename + 1 : match;
+                size_t tlen = strlen(last_token);
+                if (strncmp(m_basename, last_token, tlen) == 0) {
+                    const char *pos = strstr(match, m_basename);
+                    if (pos) printf(COLOR_DIM "%s" COLOR_RESET, pos + tlen);
+                } else {
+                    printf(COLOR_DIM "%s" COLOR_RESET, match);
+                }
+            }
+        } else {
+            printf(COLOR_DIM "%s" COLOR_RESET, match + strlen(command));
+        }
     }
     fflush(stdout);
 }
@@ -211,6 +241,8 @@ int main() {
     struct termios orig_termios;
     tcgetattr(STDIN_FILENO, &orig_termios);
     system("clear");
+    // initialize autocomplete (populate PATH commands)
+    autocomplete_init();
 
     while (1) {
         show_prompt();
@@ -239,7 +271,23 @@ int main() {
                 else if (seq[1] == 'C') { // → key = accept suggestion
                     const char *match = get_best_match(command);
                     if (match && strcmp(match, command) != 0) {
-                        strcpy(command, match);
+                        // replace only the last token in command with match
+                        char newcmd[1024];
+                        const char *last_space = strrchr(command, ' ');
+                        if (last_space) {
+                            size_t prefix_len = (size_t)(last_space - command) + 1; // include space
+                            if (prefix_len >= sizeof(newcmd)) prefix_len = sizeof(newcmd) - 1;
+                            memcpy(newcmd, command, prefix_len);
+                            newcmd[prefix_len] = '\0';
+                            strncat(newcmd, match, sizeof(newcmd) - strlen(newcmd) - 1);
+                        } else {
+                            // no space, replace whole command
+                            strncpy(newcmd, match, sizeof(newcmd));
+                            newcmd[sizeof(newcmd)-1] = '\0';
+                        }
+                        // copy back into command buffer
+                        strncpy(command, newcmd, 1024);
+                        command[1023] = '\0';
                         printf("\r\033[K");
                         show_prompt();
                         printf("%s", command);
@@ -305,6 +353,7 @@ int main() {
         commands_operator(command);
     }
 
+    autocomplete_shutdown();
     free(history);
     return 0;
 }
