@@ -22,6 +22,34 @@ void commands_operator(char *input) {
     args[i] = NULL;
 
     if (args[0] == NULL) return;
+
+    int pipe_index = -1;
+    for (int j = 0; args[j] != NULL; j++) {
+        if (strcmp(args[j], "|") == 0) {
+            pipe_index = j;
+            break;
+        }
+    }
+
+    if (pipe_index != -1) {
+        char *cmd1_args[pipe_index + 1]; // command before pipe
+        for (int i = 0; i < pipe_index; i++)
+            cmd1_args[i] = args[i];
+        cmd1_args[pipe_index] = NULL;
+
+        // command after pipe
+        int cmd2_len = 0;
+        for (int i = pipe_index + 1; args[i] != NULL; i++)
+            cmd2_len++;
+        char *cmd2_args[cmd2_len + 1];
+        for (int i = 0; i < cmd2_len; i++)
+            cmd2_args[i] = args[pipe_index + 1 + i];
+        cmd2_args[cmd2_len] = NULL;
+
+        Pipe_commands(cmd1_args, cmd2_args);
+        return;
+    }
+
     if (strcmp(args[0], "rmdir") == 0) {
         if (args[1] != NULL)
             rm_r_recursive(args[1]);
@@ -36,12 +64,12 @@ void commands_operator(char *input) {
             cd_commands("");
         return;
     }
-    if (strcmp(args[0], "ls") == 0) {
+    if (strcmp(args[0], "ls") == 0 && args[1] == NULL) {
         ls_commands(args);
         return;
     }
 
-    if (strcmp(args[0], "pwd") == 0) {
+    if (strcmp(args[0], "pwd") == 0 && args[1] == NULL) {
         pwd_commands();
         return;
     }

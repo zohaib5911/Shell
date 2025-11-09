@@ -236,35 +236,49 @@ void deactivate_virtualenv() {
     printf("Deactivated virtual environment\n");
 }
 
-void run_path(const char *input) {
-    if (!input) {
-        fprintf(stderr, "myshell: invalid argument\n");
+
+void Pipe_commands(char **cmd1_args, char **cmd2_args) {
+    int pipefd[2];
+    if (pipe(pipefd) == -1) {
+        perror("pipe");
         return;
     }
 
-    char fullpath[PATH_MAX];
-    // Resolve absolute path (handles relative paths too)
-    if (realpath(input, fullpath) == NULL) {
-        fprintf(stderr, "myshell: %s: %s\n", input, strerror(errno));
-        return;
-    }
+    pid_t pid1 = fork();
+    if (pid1 == 0) {
+        // First command: stdout -> pipe write
+        close(pipefd[0]);              // close read end
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[1]);
 
-    if (access(fullpath, F_OK) != 0) {
-        fprintf(stderr, "myshell: %s: No such file or directory\n", fullpath);
-        return;
-    }
-
-    pid_t pid = fork();
-    if (pid == 0) { // child
-        char *const argv[] = { fullpath, NULL };
-        execv(fullpath, argv);
-        perror("myshell"); // exec failed
+        execvp(cmd1_args[0], cmd1_args);
+        perror("myshell");
         exit(EXIT_FAILURE);
-    } else if (pid > 0) { // parent
-        waitpid(pid, NULL, 0);
-    } else {
+    } else if (pid1 < 0) {
         perror("fork");
+        return;
     }
+
+    pid_t pid2 = fork();
+    if (pid2 == 0) {
+        // Second command: stdin <- pipe read
+        close(pipefd[1]);              // close write end
+        dup2(pipefd[0], STDIN_FILENO);
+        close(pipefd[0]);
+
+        execvp(cmd2_args[0], cmd2_args);
+        perror("myshell");
+        exit(EXIT_FAILURE);
+    } else if (pid2 < 0) {
+        perror("fork");
+        return;
+    }
+
+    // Parent closes pipe
+    close(pipefd[0]);
+    close(pipefd[1]);
+
+    // Wait for both children
+    waitpid(pid1, NULL, 0);
+    waitpid(pid2, NULL, 0);
 }
-
-
