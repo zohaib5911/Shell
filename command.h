@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <X11/Xosdefs.h>
 #include <linux/limits.h>
+#include <errno.h>
 
 
 typedef struct {
@@ -235,45 +236,35 @@ void deactivate_virtualenv() {
     printf("Deactivated virtual environment\n");
 }
 
+void run_path(const char *input) {
+    if (!input) {
+        fprintf(stderr, "myshell: invalid argument\n");
+        return;
+    }
 
+    char fullpath[PATH_MAX];
+    // Resolve absolute path (handles relative paths too)
+    if (realpath(input, fullpath) == NULL) {
+        fprintf(stderr, "myshell: %s: %s\n", input, strerror(errno));
+        return;
+    }
 
+    if (access(fullpath, F_OK) != 0) {
+        fprintf(stderr, "myshell: %s: No such file or directory\n", fullpath);
+        return;
+    }
 
+    pid_t pid = fork();
+    if (pid == 0) { // child
+        char *const argv[] = { fullpath, NULL };
+        execv(fullpath, argv);
+        perror("myshell"); // exec failed
+        exit(EXIT_FAILURE);
+    } else if (pid > 0) { // parent
+        waitpid(pid, NULL, 0);
+    } else {
+        perror("fork");
+    }
+}
 
-// tab key
-// history mechanism
-// tries for autocompletion  (fish)
-// piping (bash)
-// redirection (bash)
-// Ctrl+C handling + Ctrl+Z handling
-// left key for autocompletion
-// --version command
-// pip install <package>
-// sudo command
-// yay command
-// pacman command
-// git command
-// making executable files and running them
-// create and control environment 
-// activate and deactivate virtual environments
-// shutdown command + restart command
-// open any app from the shell
-// neofetch command + fastfetch command
-// storage analysis command (like ncdu)
-// process monitoring command (like htop)
-// process killing command (like killall, pkill)
-// network monitoring command (like iftop, nethogs)
-// open website from shell
-// cut , copy , paste commands by shell
-// calendar command
-// alarm command
-// todo list command
-// notes command
-// weather command
-// news command
-// time command
-// date command
-// calculator command
-// dictionary command
-// translate command
-// file search command
 
