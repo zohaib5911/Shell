@@ -1,3 +1,7 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,12 +12,82 @@
 #include <X11/Xosdefs.h>
 #include <linux/limits.h>
 #include <errno.h>
-
+#include <fcntl.h>
+#include <sched.h>
+#include <signal.h>
 
 typedef struct {
     char *command;  
     int index;      
 } HistoryEntry;
+
+// --- Simple job control implementation ---
+typedef enum { JOB_RUNNING = 0, JOB_STOPPED = 1, JOB_DONE = 2 } JobStatus;
+
+typedef struct Job {
+    pid_t pid;
+    int jid;
+    char *cmdline;
+    JobStatus status;
+    struct Job *next;
+} Job;
+
+static Job *job_list = NULL;
+static int next_jid = 1;
+
+static Job *find_job_by_pid(pid_t pid) {
+    for (Job *j = job_list; j; j = j->next) if (j->pid == pid) return j;
+    return NULL;
+}
+
+static Job *find_job_by_jid(int jid) {
+    for (Job *j = job_list; j; j = j->next) if (j->jid == jid) return j;
+    return NULL;
+}
+
+static int add_job(pid_t pid, const char *cmdline, JobStatus status) {
+    Job *j = malloc(sizeof(Job));
+    if (!j) return -1;
+    j->pid = pid;
+    j->jid = next_jid++;
+    j->cmdline = strdup(cmdline ? cmdline : "");
+    j->status = status;
+    j->next = job_list;
+    job_list = j;
+    return j->jid;
+}
+
+static void remove_job(Job *job) {
+    if (!job) return;
+    Job **p = &job_list;
+    while (*p) {
+        if (*p == job) {
+            *p = job->next;
+            free(job->cmdline);
+            free(job);
+            return;
+        }
+        p = &((*p)->next);
+    }
+}
+
+static void list_jobs(void) {
+    for (Job *j = job_list; j; j = j->next) {
+        const char *st = j->status == JOB_RUNNING ? "Running" : (j->status == JOB_STOPPED ? "Stopped" : "Done");
+        printf("[%d] %s %d %s\n", j->jid, st, j->pid, j->cmdline);
+    }
+}
+
+static void mark_job_stopped(pid_t pid) {
+    Job *j = find_job_by_pid(pid);
+    if (j) j->status = JOB_STOPPED;
+}
+
+static void mark_job_running(pid_t pid) {
+    Job *j = find_job_by_pid(pid);
+    if (j) j->status = JOB_RUNNING;
+}
+
 
 extern char *history; 
 char* env_path = NULL;
@@ -237,6 +311,8 @@ void deactivate_virtualenv() {
 }
 
 
+// ---------------- Pipe Execution -----------------
+
 void Pipe_commands(char **cmd1_args, char **cmd2_args) {
     int pipefd[2];
     if (pipe(pipefd) == -1) {
@@ -246,39 +322,73 @@ void Pipe_commands(char **cmd1_args, char **cmd2_args) {
 
     pid_t pid1 = fork();
     if (pid1 == 0) {
-        // First command: stdout -> pipe write
-        close(pipefd[0]);              // close read end
         dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[0]);
         close(pipefd[1]);
-
         execvp(cmd1_args[0], cmd1_args);
-        perror("myshell");
-        exit(EXIT_FAILURE);
-    } else if (pid1 < 0) {
-        perror("fork");
-        return;
+        perror("execvp");
+        exit(1);
     }
 
     pid_t pid2 = fork();
     if (pid2 == 0) {
-        // Second command: stdin <- pipe read
-        close(pipefd[1]);              // close write end
         dup2(pipefd[0], STDIN_FILENO);
+        close(pipefd[1]);
         close(pipefd[0]);
-
         execvp(cmd2_args[0], cmd2_args);
-        perror("myshell");
-        exit(EXIT_FAILURE);
-    } else if (pid2 < 0) {
-        perror("fork");
-        return;
+        perror("execvp");
+        exit(1);
     }
 
-    // Parent closes pipe
     close(pipefd[0]);
     close(pipefd[1]);
 
-    // Wait for both children
     waitpid(pid1, NULL, 0);
     waitpid(pid2, NULL, 0);
 }
+
+
+
+// Redirection >, <, >>
+void redirect_commands(char **args, const char *output_file,
+                       const char *input_file, int append)
+{
+    pid_t pid = fork();
+
+    if (pid == 0) {
+        // INPUT REDIRECTION (<)
+        if (input_file) {
+            int fd = open(input_file, O_RDONLY);
+            if (fd < 0) {
+                perror("open input");
+                exit(EXIT_FAILURE);
+            }
+            dup2(fd, STDIN_FILENO);
+            close(fd);
+        }
+
+        // OUTPUT REDIRECTION (> or >>)
+        if (output_file) {
+            int flags = O_CREAT | O_WRONLY | (append ? O_APPEND : O_TRUNC);
+            int fd = open(output_file, flags, 0644);
+            if (fd < 0) {
+                perror("open output");
+                exit(EXIT_FAILURE);
+            }
+            dup2(fd, STDOUT_FILENO);
+            close(fd);
+        }
+
+        execvp(args[0], args);
+        perror("execvp");
+        exit(EXIT_FAILURE);
+
+    } else if (pid > 0) {
+        waitpid(pid, NULL, 0);
+    } else {
+        perror("fork");
+    }
+}
+
+
+
