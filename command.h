@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <sched.h>
 #include <signal.h>
+#include <spawn.h>
 
 typedef struct {
     char *command;  
@@ -91,6 +92,24 @@ static void mark_job_running(pid_t pid) {
 
 extern char *history; 
 char* env_path = NULL;
+extern char **environ;
+
+static inline pid_t spawn_command(char *const args[], posix_spawn_file_actions_t *actions) {
+    if (!args || !args[0]) {
+        errno = EINVAL;
+        perror("myshell");
+        return -1;
+    }
+
+    pid_t pid = -1;
+    int rc = posix_spawnp(&pid, args[0], actions, NULL, args, environ);
+    if (rc != 0) {
+        errno = rc;
+        perror("myshell");
+        return -1;
+    }
+    return pid;
+}
 
 
 int count_commands() {
@@ -186,16 +205,9 @@ void cd_commands(char *path) {
 }
 
 void ls_commands(char **args) {   
-    pid_t pid = fork();
-    if (pid == 0) {
-        execvp("ls", args);  
-        perror("myshell");
-        exit(EXIT_FAILURE);
-    } else if (pid > 0) {
+    pid_t pid = spawn_command(args, NULL);
+    if (pid > 0)
         waitpid(pid, NULL, 0);
-    } else {
-        perror("fork");
-    }
 }
 
 void pwd_commands() {
@@ -217,16 +229,10 @@ void touch_commands(char *filename) {
 }
 
 void nano_commands(char *filename) {
-    pid_t pid = fork();
-    if (pid == 0) {
-        execlp("nano", "nano", filename, NULL);
-        perror("myshell");
-        exit(EXIT_FAILURE);
-    } else if (pid > 0) {
+    char *args[] = {"nano", filename, NULL};
+    pid_t pid = spawn_command(args, NULL);
+    if (pid > 0)
         waitpid(pid, NULL, 0);
-    } else {
-        perror("fork");
-    }
 }
 void rm_commands(char *filename) {
     if (remove(filename) != 0) {
@@ -273,16 +279,10 @@ void rm_r_recursive(const char *path) {
     }
 }
 void version_command(const char* arg){
-    pid_t pid = fork();
-    if (pid == 0) {
-        execlp(arg, arg, "--version", NULL);
-        perror("myshell");
-        exit(EXIT_FAILURE);
-    } else if (pid > 0) {
+    char *args[] = {(char *)arg, "--version", NULL};
+    pid_t pid = spawn_command(args, NULL);
+    if (pid > 0)
         waitpid(pid, NULL, 0);
-    } else {
-        perror("fork");
-    }
 }
 void activate_virtualenv(const char *path) {
     char resolved[PATH_MAX];
@@ -320,28 +320,34 @@ void Pipe_commands(char **cmd1_args, char **cmd2_args) {
         return;
     }
 
-    pid_t pid1 = fork();
-    if (pid1 == 0) {
-        dup2(pipefd[1], STDOUT_FILENO);
+    posix_spawn_file_actions_t fa1;
+    posix_spawn_file_actions_init(&fa1);
+    posix_spawn_file_actions_adddup2(&fa1, pipefd[1], STDOUT_FILENO);
+    posix_spawn_file_actions_addclose(&fa1, pipefd[0]);
+    posix_spawn_file_actions_addclose(&fa1, pipefd[1]);
+    pid_t pid1 = spawn_command(cmd1_args, &fa1);
+    posix_spawn_file_actions_destroy(&fa1);
+    if (pid1 == -1) {
         close(pipefd[0]);
         close(pipefd[1]);
-        execvp(cmd1_args[0], cmd1_args);
-        perror("execvp");
-        exit(1);
+        return;
     }
 
-    pid_t pid2 = fork();
-    if (pid2 == 0) {
-        dup2(pipefd[0], STDIN_FILENO);
-        close(pipefd[1]);
-        close(pipefd[0]);
-        execvp(cmd2_args[0], cmd2_args);
-        perror("execvp");
-        exit(1);
-    }
+    posix_spawn_file_actions_t fa2;
+    posix_spawn_file_actions_init(&fa2);
+    posix_spawn_file_actions_adddup2(&fa2, pipefd[0], STDIN_FILENO);
+    posix_spawn_file_actions_addclose(&fa2, pipefd[1]);
+    posix_spawn_file_actions_addclose(&fa2, pipefd[0]);
+    pid_t pid2 = spawn_command(cmd2_args, &fa2);
+    posix_spawn_file_actions_destroy(&fa2);
 
     close(pipefd[0]);
     close(pipefd[1]);
+
+    if (pid2 == -1) {
+        waitpid(pid1, NULL, 0);
+        return;
+    }
 
     waitpid(pid1, NULL, 0);
     waitpid(pid2, NULL, 0);
@@ -353,41 +359,22 @@ void Pipe_commands(char **cmd1_args, char **cmd2_args) {
 void redirect_commands(char **args, const char *output_file,
                        const char *input_file, int append)
 {
-    pid_t pid = fork();
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
 
-    if (pid == 0) {
-        // INPUT REDIRECTION (<)
-        if (input_file) {
-            int fd = open(input_file, O_RDONLY);
-            if (fd < 0) {
-                perror("open input");
-                exit(EXIT_FAILURE);
-            }
-            dup2(fd, STDIN_FILENO);
-            close(fd);
-        }
+    if (input_file)
+        posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, input_file, O_RDONLY, 0);
 
-        // OUTPUT REDIRECTION (> or >>)
-        if (output_file) {
-            int flags = O_CREAT | O_WRONLY | (append ? O_APPEND : O_TRUNC);
-            int fd = open(output_file, flags, 0644);
-            if (fd < 0) {
-                perror("open output");
-                exit(EXIT_FAILURE);
-            }
-            dup2(fd, STDOUT_FILENO);
-            close(fd);
-        }
-
-        execvp(args[0], args);
-        perror("execvp");
-        exit(EXIT_FAILURE);
-
-    } else if (pid > 0) {
-        waitpid(pid, NULL, 0);
-    } else {
-        perror("fork");
+    if (output_file) {
+        int flags = O_CREAT | O_WRONLY | (append ? O_APPEND : O_TRUNC);
+        posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, output_file, flags, 0644);
     }
+
+    pid_t pid = spawn_command(args, &fa);
+    posix_spawn_file_actions_destroy(&fa);
+
+    if (pid > 0)
+        waitpid(pid, NULL, 0);
 }
 
 

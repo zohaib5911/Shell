@@ -237,39 +237,33 @@ void commands_operator(char *input) {
     }
 
     // ------------------ NORMAL EXECUTION ------------------
-    pid_t pid = fork();
-    if (pid == 0) {
-        // child
-        execvp(args[0], args);
-        perror("myshell");
-        exit(EXIT_FAILURE);
-    } else if (pid > 0) {
-        // parent
-        if (background) {
-            int jid = add_job(pid, input, JOB_RUNNING);
-            if (jid < 0)
-                fprintf(stderr, "failed to add background job\n");
-            else
-                printf("[%d] %d\n", jid, pid);
-            // do not wait
-        } else {
-            fg_pid = pid;
-            int status = 0;
-            waitpid(pid, &status, WUNTRACED);
-            if (WIFSTOPPED(status)) {
-                // add to job list as stopped
-                add_job(pid, input, JOB_STOPPED);
-                printf("\n[%d] Stopped %d %s\n", next_jid-1, pid, input);
-            } else {
-                // if finished, ensure it's removed from jobs if present
-                Job *j = find_job_by_pid(pid);
-                if (j) remove_job(j);
-            }
-            fg_pid = 0;
-        }
-    } else {
-        perror("fork");
+    pid_t pid = spawn_command(args, NULL);
+    if (pid < 0)
+        return;
+
+    if (background) {
+        int jid = add_job(pid, input, JOB_RUNNING);
+        if (jid < 0)
+            fprintf(stderr, "failed to add background job\n");
+        else
+            printf("[%d] %d\n", jid, pid);
+        // do not wait
+        return;
     }
+
+    fg_pid = pid;
+    int status = 0;
+    waitpid(pid, &status, WUNTRACED);
+    if (WIFSTOPPED(status)) {
+        // add to job list as stopped
+        add_job(pid, input, JOB_STOPPED);
+        printf("\n[%d] Stopped %d %s\n", next_jid-1, pid, input);
+    } else {
+        // if finished, ensure it's removed from jobs if present
+        Job *j = find_job_by_pid(pid);
+        if (j) remove_job(j);
+    }
+    fg_pid = 0;
 }
 
 
